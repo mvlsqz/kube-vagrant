@@ -1,0 +1,291 @@
+---
+- hosts: all
+  become: true
+
+  tasks:
+
+  - name: Disable firewall on {{ role }} instances
+    systemd:
+      name: ufw
+      state: stopped
+      enabled: no
+
+  - name: Install docker required packages
+    package:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - bash-completion
+
+  - name: required kenel modules load
+    modprobe:
+      name: "{{ item }}"
+    loop:
+      - overlay
+      - br_netfilter
+
+  - name: Ensure kernel modules persist after reboot
+    lineinfile:
+      path: "/etc/modules-load.d/containerd.conf"
+      state: present
+      line: "{{ item }}"
+      create: yes
+    loop:
+      - overlay
+      - br_netfilter
+
+  - name: Ensure required sysctl params are enabled
+    sysctl:
+      state: present
+      name: "{{ item.name }}"
+      value: "{{ item.value }}"
+      sysctl_set: yes
+      reload: yes
+    loop:
+      - { name: 'net.bridge.bridge-nf-call-iptables', value: 1 }
+      - { name: 'net.ipv4.ip_forward', value: 1 }
+      - { name: 'net.bridge.bridge-nf-call-ip6tables', value: 1 }
+
+  - name: adding docker gpg key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: adding docker community repository
+    apt_repository:
+      repo: 'deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable'
+      state: present
+
+  - name: Installing docker community
+    package:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - containerd.io
+
+  - name: Creating containerd config dir
+    file:
+      path: /etc/containerd
+      state: directory
+      owner: root
+      group: root
+
+  - name: configuring cni
+    file:
+      path: /etc/cni/net.d
+      state: directory
+      owner: root
+      group: root
+
+  - name: configuring cni bridge
+    template:
+      src: templates/cni-bridge.conf.j2
+      dest: /etc/cni/net.d/10-bridge.conf
+      owner: root
+      group: root
+
+  - name: configuring cni loopback
+    template:
+      src: templates/cni-loopback.conf.j2
+      dest: /etc/cni/net.d/99-loopback.conf
+      owner: root
+      group: root
+
+  - name: Configuring docker daemon
+    copy:
+      src: files/config.toml
+      dest: /etc/containerd/config.toml
+      owner: root
+      group: root
+    notify:
+      - reload_systemd
+      - restart_containerd
+
+  - name: Configuring docker daemon
+    copy:
+      src: files/crictl.yaml
+      dest: /etc/crictl.yaml
+      owner: root
+      group: root
+    notify:
+      - reload_systemd
+      - restart_containerd
+
+  - meta: flush_handlers
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Install iptables backends
+    package:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - iptables
+      - arptables
+      - ebtables
+
+  - name: adding kubernetes gpg key
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: adding kubernetes community repository
+    apt_repository:
+      repo: 'deb https://apt.kubernetes.io/ kubernetes-xenial main'
+      state: present
+
+  - name: Installing kubeadm, kubelet and kubectl
+    package:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - kubelet
+      - kubeadm
+      - kubectl
+
+  - name: Enabling kubectl autocompletion
+    shell:
+      cmd: kubectl completion bash >/etc/bash_completion.d/kubectl
+      creates: /etc/bash_completion.d/kubectl
+
+  - name: Enabling kubeadm autocompletion
+    shell:
+      cmd: kubeadm completion bash >/etc/bash_completion.d/kubeadm
+      creates: /etc/bash_completion.d/kubeadm
+
+  - name: Adding extra flags to kubelet init script
+    lineinfile:
+      path: "/etc/default/kubelet"
+      state: present
+      line: "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
+      create: yes
+
+  - name: Starting kubelet service
+    service:
+      name: kubelet
+      state: started
+      enabled: yes
+
+  - name: configuring cni bridge
+    template:
+      src: templates/init-config.yaml.j2
+      dest: /tmp/init-config.yaml
+    when: role == 'controller'
+
+  - name: Initialize the Kubernetes "{{ role }}" as control plane
+    command: kubeadm init --config /tmp/init-config.yaml
+    args:
+      creates: /etc/kubernetes/admin.conf
+    when: role == 'controller'
+
+  - name: create kube dir for kube config on vagrant home
+    file:
+      path: '/home/vagrant/.kube'
+      state: directory
+      owner: vagrant
+      group: vagrant
+    when: role == 'controller'
+
+  - name: copy kube config to vagrant user
+    copy:
+      remote_src: yes
+      src: /etc/kubernetes/admin.conf
+      dest: /home/vagrant/.kube/config
+      owner: vagrant
+      group: vagrant
+    when: role == 'controller'
+
+  - name: Generate join command
+    shell: |
+      kubeadm token create --print-join-command | sed "s/{{ ansible_default_ipv4.address }}/{{ node_ip }}/g"
+    register: join_command
+    when: role == 'controller'
+    run_once: True
+
+  - name: Creating join command in the remote system
+    copy:
+      content: "{{ join_command.stdout_lines[0] }}"
+      dest: /tmp/join-command.sh
+    when: role == 'controller'
+
+  - name: fetch join command
+    fetch:
+      src: /tmp/join-command.sh
+      dest: files/join-command.sh
+      flat: yes
+    when: role == 'controller'
+
+  - name: Copy the join command to server location
+    copy:
+      src: files/join-command.sh
+      dest: /tmp/join-command.sh
+      mode: 0777
+    when: role == 'worker'
+
+  - name: Initialize the kubernetes "{{ role }}" as worker
+    shell: |
+      bash /tmp/join-command.sh
+    args:
+      creates: /etc/kubernetes/kubelet.conf
+    when: role == 'worker'
+
+  - name: Copy pod network manifest
+    copy:
+      src: files/calico.yaml
+      dest: /tmp/calico.yaml
+    when: role == 'controller'
+
+  - name: Installing pod network
+    shell: |
+      kubectl apply -f /tmp/calico.yaml && \
+      touch /tmp/calico-applied
+    args:
+      creates: /tmp/calico-applied
+    when: role == 'controller'
+    become: no
+
+  - name: Installing tools
+    get_url:
+      url: "{{ item }}"
+      dest: /usr/local/bin/
+      mode: '0777'
+    loop:
+      - 'https://github.com/projectcalico/calicoctl/releases/download/v3.8.0/calicoctl'
+    when: role == 'controller'
+
+  - name: Configuring calico client
+    lineinfile:
+      path: /home/vagrant/.bashrc
+      state: present
+      line: "{{ item }}"
+    loop:
+      - 'export KUBECONFIG=~/.kube/config'
+      - 'export DATASTORE_TYPE=kubernetes'
+    when: role == 'controller'
+
+  handlers:
+    - name: reload_systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart_containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes

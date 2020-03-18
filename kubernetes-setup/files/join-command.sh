@@ -1,0 +1,1 @@
+kubeadm join 10.240.0.11:6443 --token ioptlv.0gk3c3ot93dt1e7t     --discovery-token-ca-cert-hash sha256:08f4cb7c6411861035cda3bd99230e60dc57af952eb95d4acb8865b75125a5ec 

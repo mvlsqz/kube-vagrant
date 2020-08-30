@@ -249,6 +249,7 @@
     copy:
       src: files/calico.yaml
       dest: /tmp/calico.yaml
+      mode: '0664'
     when: role == 'controller'
 
   - name: Installing pod network

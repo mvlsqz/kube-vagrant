@@ -5,7 +5,7 @@ Kubernetes running on vagrant, for testing porpouses
 * Python virtual environment manager, [Miniconda](https://www.google.com) will be used to run this example
 * VirtualBox
 * Vagrant
-* Vagrant disk resize `vagrant plugin install vagrant-disksize`
+* Vagrant disk resize plugin `vagrant plugin install vagrant-disksize`
 
 # Preparing workspace
 Installing virtual environment
